@@ -1,0 +1,209 @@
+#This code generates posture datafile form each individual csv file named like "2_201605283_0.0_17" and has columns: filename	predict	animal_id	date	hour	minute	second	ms	timestamp	belongtobehavior	posture
+#The output from a single file generates 144 rows of These columns:day_cat	time_segment	belongtobehavior	total_time_spent	num_events	avg_time_per_event	ds	sow_num	mortality	sow_id	percent_mortality	percent_overlays	crate_size	crate_category	heat_lamps	parity
+
+
+
+import pandas as pd
+import numpy as np
+import os
+from datetime import datetime
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# Define paths
+info_file = r"C:\Users\mrahman8\OneDrive - University of Nebraska-Lincoln\SAU_Drive\0. UNL STUDY\0. Research\0.Current_work\JAN2025\0. Data analysis\Updated_DS_Sow_info_with_parity.csv"
+data_folder = r"C:\Users\mrahman8\Desktop\test\csvall"
+output_file = r"C:\Users\mrahman8\Desktop\test\3-17-25.csv"
+
+# Load the info file
+info_df = pd.read_csv(info_file)
+info_df['date'] = pd.to_datetime(info_df['date'], errors='coerce')
+info_df = info_df.drop_duplicates(subset=['ds', 'sow_num'])
+
+# Get unique sows in the info file
+info_sows = set(info_df[['ds', 'sow_num']].apply(tuple, axis=1))
+print(f"Number of unique sows in the info file: {len(info_sows)}")
+
+# List all CSV files in the specified data folder
+data_files = [os.path.join(data_folder, file) for file in os.listdir(data_folder) if file.endswith('.csv')]
+
+# Extract unique sows from the data folder
+data_sows = set()
+file_map = {}
+for file in data_files:
+    filename = os.path.basename(file)
+    parts = filename.split('_')
+    if len(parts) == 4 and parts[0].isdigit() and parts[3].replace('.csv', '').isdigit():
+        ds = int(parts[0])  # Extract ds from the filename
+        sow_num = int(parts[3].replace('.csv', ''))  # Extract sow_num from the filename
+        sow_key = (ds, sow_num)
+        data_sows.add(sow_key)
+        file_map[sow_key] = filename
+
+print(f"Number of unique sows in the data folder: {len(data_sows)}")
+
+# Find the intersection of sows between info file and data folder
+common_sows = info_sows & data_sows
+print(f"Number of sows to process: {len(common_sows)}")
+
+# Initialize an empty list to store results
+all_results = []
+
+# All combinations of day_cat, time_segment, and belongtobehavior
+day_cats = ['pre', 'f_day', 'post']
+time_segments = ["0AM-3AM", "3AM-6AM", "6AM-9AM", "9AM-12PM", "12PM-3PM", "3PM-6PM", "6PM-9PM", "9PM-12AM"]
+belongtobehaviors = ["standing", "sitting", "kneeling", "lyingonbelly", "lyingonright", "lyingonleft"]
+all_combinations = pd.MultiIndex.from_product([day_cats, time_segments, belongtobehaviors],
+                                              names=['day_cat', 'time_segment', 'belongtobehavior'])
+
+def process_file(data_file, ds, sow_num):
+    try:
+        data_df = pd.read_csv(data_file)
+    except Exception as e:
+        print(f"Error reading file {data_file}: {e}")
+        return None
+
+    # Treat 'posture' as 'belongtobehavior'
+    data_df['belongtobehavior'] = data_df['posture']
+
+    # Convert date and ensure valid rows
+    data_df['date'] = pd.to_datetime(data_df['date'], errors='coerce')
+    if data_df['date'].isna().all():
+        print(f"File has no valid date values: {data_file}")
+        return None
+
+    # Fetch matching info
+    matching_info = info_df[(info_df['ds'] == ds) & (info_df['sow_num'] == sow_num)]
+    if matching_info.empty:
+        print(f"No matching info for DS: {ds}, Sow Num: {sow_num}")
+        return None
+    matching_info = matching_info.iloc[0]
+    farrowing_date = matching_info['date']
+
+    # Assign day categories
+    unique_dates = data_df['date'].dt.date.dropna().unique()
+    pre_dates = unique_dates[(unique_dates < farrowing_date.date())][-3:]
+    post_dates = unique_dates[(unique_dates > farrowing_date.date())][:3]
+    data_df['day_cat'] = np.where(data_df['date'].dt.date.isin(pre_dates), 'pre',
+                          np.where(data_df['date'].dt.date == farrowing_date.date(), 'f_day',
+                          np.where(data_df['date'].dt.date.isin(post_dates), 'post', None)))
+    data_df = data_df.dropna(subset=['day_cat'])
+
+    # Create timestamp
+    data_df['timestamp'] = pd.to_datetime(
+        data_df['date'].dt.strftime('%Y-%m-%d') + ' ' +
+        data_df['hour'].astype(str).str.zfill(2) + ':' +
+        data_df['minute'].astype(str).str.zfill(2) + ':' +
+        data_df['second'].astype(str).str.zfill(2) + '.' +
+        data_df['ms'].astype(str).str.zfill(3),
+        format='%Y-%m-%d %H:%M:%S.%f',
+        errors='coerce'
+    )
+    if data_df['timestamp'].isna().any():
+        print(f"Timestamp conversion failed for file: {data_file}")
+        return None
+
+    # Define time segments
+    def time_segment(hour):
+        bins = [
+            (0, 3, "0AM-3AM"), (3, 6, "3AM-6AM"), (6, 9, "6AM-9AM"), (9, 12, "9AM-12PM"),
+            (12, 15, "12PM-3PM"), (15, 18, "3PM-6PM"), (18, 21, "6PM-9PM"), (21, 24, "9PM-12AM")
+        ]
+        for start, end, label in bins:
+            if start <= hour < end:
+                return label
+        return np.nan
+
+    data_df['time_segment'] = data_df['hour'].apply(time_segment)
+
+    # Identify events
+    data_df['event_id'] = (data_df['belongtobehavior'] != data_df['belongtobehavior'].shift()).cumsum()
+
+    # Calculate event statistics
+    events_df = data_df.groupby(['day_cat', 'time_segment', 'belongtobehavior', 'event_id']).agg(
+        start_time=('timestamp', 'min'),
+        end_time=('timestamp', 'max')
+    ).reset_index()
+
+    # Ensure start_time and end_time are on the same date
+    events_df['start_date'] = events_df['start_time'].dt.date
+    events_df['end_date'] = events_df['end_time'].dt.date
+    events_df = events_df[events_df['start_date'] == events_df['end_date']]
+
+    # Calculate duration for each event
+    events_df['duration'] = (events_df['end_time'] - events_df['start_time']).dt.total_seconds()
+
+    # Filter out events with duration less than 5 seconds
+    events_df = events_df[events_df['duration'] >= 5]
+
+    # Cap duration at 10800 seconds (3 hours)
+    events_df['duration'] = events_df['duration'].clip(upper=10800)
+
+    # Aggregate by day_cat, time_segment, and belongtobehavior
+    agg_df = events_df.groupby(['day_cat', 'time_segment', 'belongtobehavior']).agg(
+        total_time_spent=('duration', 'sum'),  # Sum of all event durations
+        num_events=('event_id', 'nunique'),    # Count of unique events
+        avg_time_per_event=('duration', 'mean')  # Average duration per event
+    ).reset_index()
+
+    # Add metadata (including ds and sow_num) to agg_df
+    for col in ['ds', 'sow_num', 'mortality', 'sow_id', 'percent_mortality', 
+                'percent_overlays', 'crate_size', 'crate_category', 'heat_lamps', 'parity']:
+        agg_df[col] = matching_info[col]
+
+    # Apply total time constraints for each ds, sow_num, day_cat, and time_segment combination
+    def cap_total_time(group):
+        day_cat = group['day_cat'].iloc[0]
+        max_time = 32400 if day_cat in ['pre', 'post'] else 10800  # Max time in seconds
+        total_time = group['total_time_spent'].sum()
+        if total_time > max_time:
+            print(f"Scaling down total_time_spent for DS: {group['ds'].iloc[0]}, Sow Num: {group['sow_num'].iloc[0]}, {day_cat}, {group['time_segment'].iloc[0]} (original: {total_time}, max: {max_time})")
+            scale_factor = max_time / total_time
+            group['total_time_spent'] *= scale_factor
+            group['avg_time_per_event'] *= scale_factor
+        return group
+
+    # Reset index after applying cap_total_time
+    agg_df = agg_df.groupby(['ds', 'sow_num', 'day_cat', 'time_segment'], group_keys=False).apply(cap_total_time).reset_index(drop=True)
+
+    # Add missing combinations
+    full_df = pd.DataFrame(index=all_combinations).reset_index()
+    result_df = pd.merge(full_df, agg_df, how='left',
+                         on=['day_cat', 'time_segment', 'belongtobehavior'])
+
+    # Fill missing metadata columns with matching_info
+    for col in ['ds', 'sow_num', 'mortality', 'sow_id', 'percent_mortality', 
+                'percent_overlays', 'crate_size', 'crate_category', 'heat_lamps', 'parity']:
+        result_df[col] = matching_info[col]
+
+    # Fill missing total_time_spent, num_events, and avg_time_per_event with 0
+    result_df.fillna({'total_time_spent': 0, 'num_events': 0, 'avg_time_per_event': 0}, inplace=True)
+
+    return result_df
+
+# Process files for common sows
+processed_sows = set()  # Track processed sows to avoid duplicates
+for file in data_files:
+    filename = os.path.basename(file)
+    parts = filename.split('_')
+    if len(parts) == 4 and parts[0].isdigit() and parts[3].replace('.csv', '').isdigit():
+        ds = int(parts[0])  # Extract ds from the filename
+        sow_num = int(parts[3].replace('.csv', ''))  # Extract sow_num from the filename
+        if (ds, sow_num) in common_sows and (ds, sow_num) not in processed_sows:
+            print(f"Processing DS: {ds}, Sow Num: {sow_num}, File: {filename}")
+            result = process_file(file, ds, sow_num)
+            if result is not None:
+                all_results.append(result)
+                processed_sows.add((ds, sow_num))  # Mark as processed
+
+# Check if all_results is empty
+if not all_results:
+    print("No valid results to process. Check input files and data.")
+else:
+    # Combine results
+    final_results_df = pd.concat(all_results, ignore_index=True)
+
+    # Save the final output
+    final_results_df.to_csv(output_file, index=False)
+
+    print(f"Processing complete. Output saved to: {output_file}")
