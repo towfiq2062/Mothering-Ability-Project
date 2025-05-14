@@ -1,0 +1,129 @@
+/*This code runs mixed models for postures and posture shifts. First part of this code runs PROC GLIMMIX model for average time for posture events with gamma distribution and link log function. Second part runs same model with posture shift counts with Poisson distribution and link log function. */
+%web_drop_table(WORK.IMPORT;
+
+
+FILENAME REFFILE '/home/u59726210/MAI/Merged_Final_CH4_3-18-2025.csv';
+
+PROC IMPORT DATAFILE=REFFILE
+	DBMS=CSV
+	OUT=WORK.IMPORT1;
+	GETNAMES=YES;
+RUN;
+PROC CONTENTS DATA=WORK.IMPORT1; RUN;
+
+
+/*%web_open_table(WORK.IMPORT1);*/
+/**************************************************************/
+/*Single RUN*/
+
+/*
+proc glimmix data=IMPORT1;
+    class sow_id day_cat mortality heat_lamps crate_category parity;
+    model avg_time_per_event_lyingonleft = mortality heat_lamps day_cat crate_category parity
+                                        crate_category*heat_lamps crate_category*parity
+                                       / solution dist=poisson link=log;
+    random intercept / subject=sow_id;
+    lsmeans mortality heat_lamps day_cat crate_category parity
+                                        crate_category*heat_lamps crate_category*parity / slice=crate_category;
+run;
+
+*/
+
+
+
+/*All Postures*/
+
+/* Define the main GLIMMIX macro */
+/* Postures */
+
+
+%macro run_glimmix(response);
+    /*Create a temporary dataset excluding missing or zero/negative responses*/
+    data _temp;
+        set IMPORT1;
+        if not missing(&response) and &response > 0;
+    run;
+
+    proc glimmix data=_temp method=quad;
+        class sow_id day_cat mortality heat_lamps crate_category parity;
+        model &response = crate_category heat_lamps parity day_cat  
+                          crate_category*heat_lamps crate_category*parity
+                          / solution dist=gamma link=log;
+        random intercept / subject=sow_id;
+        lsmeans crate_category heat_lamps parity day_cat  
+                crate_category*heat_lamps crate_category*parity /diff ilink;
+    run;
+%mend;
+
+%macro loop_glimmix;
+    %let responses = avg_time_per_event_kneeling 
+                     avg_time_per_event_lyingonbelly 
+                     avg_time_per_event_lyingonleft 
+                     avg_time_per_event_lyingonright 
+                     avg_time_per_event_sitting 
+                     avg_time_per_event_standing;
+                     
+                     /*num_events_lyingonleft
+                     num_events_kneeling 
+                     num_events_lyingonbelly 
+                     num_events_lyingonleft 
+                     num_events_lyingonright 
+                     num_events_sitting 
+                     num_events_standing;*/
+                     
+
+    %let i = 1;
+    %let response = %scan(&responses, &i);
+
+    %do %while(%length(&response) > 0);
+        %put ===== Running model for &response =====;
+        %run_glimmix(&response);  /* CORRECTED MACRO NAME */
+        %let i = %eval(&i + 1);
+        %let response = %scan(&responses, &i);
+    %end;
+%mend;
+
+%loop_glimmix;
+
+/******************************************************************************************************/
+/*All Shifts*/
+
+
+%macro run_glimmix(response);
+    /*Create a temporary dataset excluding missing or zero/negative responses*/
+    data _temp;
+        set IMPORT1;
+        if not missing(&response) and &response > 0;
+    run;
+
+    proc glimmix data=_temp method=quad;
+        class sow_id day_cat mortality heat_lamps crate_category parity;
+        model &response = crate_category heat_lamps parity day_cat  
+                          crate_category*heat_lamps crate_category*parity
+                          / solution dist=Poisson link=log;
+        random intercept / subject=sow_id;
+        lsmeans crate_category heat_lamps parity day_cat  
+                crate_category*heat_lamps crate_category*parity /diff ilink;
+    run;
+%mend;
+
+/*Macro loop that cycles through your responses*/
+%macro loop_glimmix;
+    %let responses = n_rolling_events 
+                     n_lying_upright_trans 
+                     n_stand_sit_kneel_trans 
+                     n_lying_sit_kneel_trans;
+
+    %let i = 1;
+    %let response = %scan(&responses, &i);
+
+    %do %while(%length(&response) > 0);
+        %put ===== Running model for &response =====;
+        %run_glimmix(&response);
+        %let i = %eval(&i + 1);
+        %let response = %scan(&responses, &i);
+    %end;
+%mend;
+
+/*Run the loop*/
+%loop_glimmix;
