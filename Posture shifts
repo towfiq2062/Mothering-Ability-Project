@@ -1,0 +1,334 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Mar 27 15:24:03 2025
+
+@author: mrahman8
+"""
+
+import pandas as pd
+import numpy as np
+import os
+from datetime import datetime, timedelta
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# Define paths
+info_file = r"C:\Users\mrahman8\OneDrive - University of Nebraska-Lincoln\SAU_Drive\0. UNL STUDY\0. Research\0.Current_work\JAN2025\Updated_DS_Sow_info_with_parity.csv"
+data_folder = r"C:/Users/mrahman8/OneDrive - University of Nebraska-Lincoln/SAU_Drive/0. UNL STUDY/0. Research/0.Current_work/JAN2025/csvall"
+output_file = r"C:/Users/mrahman8/OneDrive - University of Nebraska-Lincoln/SAU_Drive/0. UNL STUDY/0. Research/0.Current_work/JAN2025/YOLO_139_with_transitions_v2.csv"
+
+# Constants
+MAX_ROLLING_DURATION = 180  # seconds for LOB duration in rolling
+LYING_POSTURES = {'lyingonleft', 'lyingonright', 'lyingonbelly'}
+
+# Load and validate info file
+info_df = pd.read_csv(info_file)
+
+# Validate date column
+if 'date' not in info_df.columns:
+    raise KeyError("The 'date' column is missing from the info file")
+
+info_df['date'] = pd.to_datetime(info_df['date'], errors='coerce')
+missing_dates = info_df['date'].isna()
+if missing_dates.any():
+    print(f"Warning: {missing_dates.sum()} rows have invalid dates")
+    print(info_df[missing_dates][['ds', 'sow_num']])
+    info_df = info_df[~missing_dates]  # Remove rows with invalid dates
+
+info_df = info_df.drop_duplicates(subset=['ds', 'sow_num'])
+
+# Get unique sows in the info file
+info_sows = set(info_df[['ds', 'sow_num']].apply(tuple, axis=1))
+print(f"Number of unique sows in the info file: {len(info_sows)}")
+
+# List all CSV files in the data folder
+data_files = [os.path.join(data_folder, file) for file in os.listdir(data_folder) if file.endswith('.csv')]
+
+# Extract unique sows from the data folder
+data_sows = set()
+file_map = {}
+for file in data_files:
+    filename = os.path.basename(file)
+    parts = filename.split('_')
+    if len(parts) == 4 and parts[0].isdigit() and parts[3].replace('.csv', '').isdigit():
+        ds = int(parts[0])
+        sow_num = int(parts[3].replace('.csv', ''))
+        sow_key = (ds, sow_num)
+        data_sows.add(sow_key)
+        file_map[sow_key] = filename
+
+print(f"Number of unique sows in the data folder: {len(data_sows)}")
+common_sows = info_sows & data_sows
+print(f"Number of sows to process: {len(common_sows)}")
+
+# Define analysis parameters
+day_cats = ['pre', 'f_day', 'post']
+time_segments = ["0AM-3AM", "3AM-6AM", "6AM-9AM", "9AM-12PM", 
+                "12PM-3PM", "3PM-6PM", "6PM-9PM", "9PM-12AM"]
+base_behaviors = ["standing", "sitting", "kneeling", 
+                 "lyingonbelly", "lyingonright", "lyingonleft"]
+transition_behaviors = ["rolling", "lying_upright", "stand_kneel", "lying_sit"]
+all_behaviors = base_behaviors + transition_behaviors
+all_combinations = pd.MultiIndex.from_product([day_cats, time_segments, all_behaviors],
+                                            names=['day_cat', 'time_segment', 'belongtobehavior'])
+
+def time_segment(hour):
+    bins = [
+        (0, 3, "0AM-3AM"), (3, 6, "3AM-6AM"), (6, 9, "6AM-9AM"), (9, 12, "9AM-12PM"),
+        (12, 15, "12PM-3PM"), (15, 18, "3PM-6PM"), (18, 21, "6PM-9PM"), (21, 24, "9PM-12AM")
+    ]
+    for start, end, label in bins:
+        if start <= hour < end:
+            return label
+    return np.nan
+
+def detect_transitions(data_df, pre_dates, farrowing_date, post_dates):
+    # Initialize transition counts
+    transitions = []
+    
+    # Sort by timestamp
+    data_df = data_df.sort_values('timestamp')
+    
+    # Initialize tracking variables
+    current_posture = None
+    posture_start = None
+    lying_sequence = []
+    
+    for idx, row in data_df.iterrows():
+        new_posture = row['belongtobehavior']
+        ts = time_segment(row['timestamp'].hour)
+        transition_date = row['timestamp'].date()
+        day_cat = 'pre' if transition_date in pre_dates else \
+                 'f_day' if transition_date == farrowing_date.date() else \
+                 'post'
+        
+        # Detect rolling events
+        if new_posture in LYING_POSTURES:
+            lying_sequence.append((new_posture, row['timestamp']))
+            
+            # Check for direct rolling (LOL <-> LOR)
+            if len(lying_sequence) >= 2:
+                last_two = [p[0] for p in lying_sequence[-2:]]
+                if set(last_two) == {'lyingonleft', 'lyingonright'}:
+                    transitions.append({
+                        'timestamp': row['timestamp'],
+                        'belongtobehavior': 'rolling',
+                        'day_cat': day_cat,
+                        'time_segment': ts
+                    })
+            
+            # Check for rolling through LOB
+            if len(lying_sequence) >= 3:
+                last_three = lying_sequence[-3:]
+                postures = {p[0] for p in last_three}
+                times = [p[1] for p in last_three]
+                
+                # Check if we have LOL-LOB-LOR or LOR-LOB-LOL pattern
+                if postures == {'lyingonleft', 'lyingonbelly', 'lyingonright'} or \
+                   postures == {'lyingonright', 'lyingonbelly', 'lyingonleft'}:
+                    lob_duration = (times[2] - times[1]).total_seconds()
+                    if lob_duration <= MAX_ROLLING_DURATION:
+                        transitions.append({
+                            'timestamp': row['timestamp'],
+                            'belongtobehavior': 'rolling',
+                            'day_cat': day_cat,
+                            'time_segment': ts
+                        })
+        else:
+            lying_sequence = []  # Reset if posture is not lying
+        
+        # Detect other transitions
+        if current_posture is not None and new_posture != current_posture:
+            transition = (current_posture, new_posture)
+            
+            # Lying upright (lying <-> standing)
+            if (transition[0] in LYING_POSTURES and transition[1] == 'standing') or \
+               (transition[0] == 'standing' and transition[1] in LYING_POSTURES):
+                transitions.append({
+                    'timestamp': row['timestamp'],
+                    'belongtobehavior': 'lying_upright',
+                    'day_cat': day_cat,
+                    'time_segment': ts
+                })
+            
+            # Stand-kneel (stand <-> kneel)
+            if {transition[0], transition[1]} == {'standing', 'kneeling'}:
+                transitions.append({
+                    'timestamp': row['timestamp'],
+                    'belongtobehavior': 'stand_kneel',
+                    'day_cat': day_cat,
+                    'time_segment': ts
+                })
+            
+            # Lying-sit (lying <-> sit)
+            if (transition[0] in LYING_POSTURES and transition[1] == 'sitting') or \
+               (transition[0] == 'sitting' and transition[1] in LYING_POSTURES):
+                transitions.append({
+                    'timestamp': row['timestamp'],
+                    'belongtobehavior': 'lying_sit',
+                    'day_cat': day_cat,
+                    'time_segment': ts
+                })
+        
+        current_posture = new_posture
+    
+    return pd.DataFrame(transitions)
+
+def process_file(data_file, ds, sow_num):
+    try:
+        data_df = pd.read_csv(data_file)
+    except Exception as e:
+        print(f"Error reading {os.path.basename(data_file)}: {e}")
+        return None
+
+    # Validate data file structure
+    required_cols = ['date', 'hour', 'minute', 'second', 'ms', 'posture']
+    missing_cols = [col for col in required_cols if col not in data_df.columns]
+    if missing_cols:
+        print(f"Skipping {os.path.basename(data_file)} - missing columns: {missing_cols}")
+        return None
+
+    # Process dates
+    data_df['date'] = pd.to_datetime(data_df['date'], errors='coerce')
+    data_df = data_df.dropna(subset=['date'])
+    data_df['belongtobehavior'] = data_df['posture']
+    
+    # Get matching info
+    matching_info = info_df[(info_df['ds'] == ds) & (info_df['sow_num'] == sow_num)]
+    if matching_info.empty:
+        print(f"No info for DS{ds} Sow{sow_num}")
+        return None
+    
+    matching_info = matching_info.iloc[0]
+    farrowing_date = matching_info['date']
+    
+    if pd.isna(farrowing_date):
+        print(f"Skipping DS{ds} Sow{sow_num} - invalid farrowing date")
+        return None
+
+    # Date categorization
+    unique_dates = data_df['date'].dt.date.unique()
+    pre_dates = [d for d in unique_dates if d < farrowing_date.date()][-3:]
+    post_dates = [d for d in unique_dates if d > farrowing_date.date()][:3]
+    
+    data_df['day_cat'] = np.select(
+        [data_df['date'].dt.date.isin(pre_dates),
+         data_df['date'].dt.date == farrowing_date.date(),
+         data_df['date'].dt.date.isin(post_dates)],
+        ['pre', 'f_day', 'post'],
+        default=np.nan
+    )
+    data_df = data_df.dropna(subset=['day_cat'])
+    
+    # Create timestamp
+    data_df['timestamp'] = pd.to_datetime(
+        data_df['date'].dt.strftime('%Y-%m-%d') + ' ' +
+        data_df['hour'].astype(str).str.zfill(2) + ':' +
+        data_df['minute'].astype(str).str.zfill(2) + ':' +
+        data_df['second'].astype(str).str.zfill(2) + '.' +
+        data_df['ms'].astype(str).str.zfill(3),
+        format='%Y-%m-%d %H:%M:%S.%f',
+        errors='coerce'
+    )
+    data_df = data_df.dropna(subset=['timestamp'])
+    
+    # Detect transitions (counts only)
+    transitions_df = detect_transitions(data_df, pre_dates, farrowing_date, post_dates)
+    
+    # Create base events (for duration behaviors)
+    data_df['event_id'] = (data_df['belongtobehavior'] != data_df['belongtobehavior'].shift()).cumsum()
+    events_df = data_df.groupby(['event_id', 'day_cat', 'belongtobehavior']).agg(
+        start_time=('timestamp', 'min'),
+        end_time=('timestamp', 'max')
+    ).reset_index()
+    events_df['duration'] = (events_df['end_time'] - events_df['start_time']).dt.total_seconds()
+    
+    # Filter events
+    events_df = events_df[events_df['duration'] >= 5]
+    events_df['duration'] = events_df['duration'].clip(upper=10800)
+    events_df['time_segment'] = events_df['start_time'].apply(lambda x: time_segment(x.hour))
+    
+    # Aggregate base behaviors (duration metrics)
+    agg_duration = events_df.groupby(['day_cat', 'time_segment', 'belongtobehavior']).agg(
+        total_time_spent=('duration', 'sum'),
+        num_events=('belongtobehavior', 'count'),
+        avg_time_per_event=('duration', 'mean')
+    ).reset_index()
+    
+    # Aggregate transitions (count metrics)
+    if not transitions_df.empty:
+        agg_transitions = transitions_df.groupby(['day_cat', 'time_segment', 'belongtobehavior']).size().reset_index(name='count')
+    else:
+        agg_transitions = pd.DataFrame(columns=['day_cat', 'time_segment', 'belongtobehavior', 'count'])
+    
+    # Combine all metrics
+    combined_df = pd.merge(
+        agg_duration, 
+        agg_transitions, 
+        on=['day_cat', 'time_segment', 'belongtobehavior'], 
+        how='outer'
+    )
+    combined_df['count'] = combined_df['count'].fillna(0)
+    
+    # Add metadata
+    metadata_cols = ['ds', 'sow_num', 'mortality', 'sow_id', 'percent_mortality',
+                    'percent_overlays', 'crate_size', 'crate_category', 'heat_lamps', 
+                    'parity', 'date']
+    
+    for col in metadata_cols:
+        if col in matching_info:
+            combined_df[col] = matching_info[col]
+        else:
+            combined_df[col] = np.nan
+    
+    # Create full combination grid
+    full_grid = pd.DataFrame(index=all_combinations).reset_index()
+    result_df = pd.merge(full_grid, combined_df, on=['day_cat', 'time_segment', 'belongtobehavior'], how='left')
+    
+    # Fill missing values
+    for col in ['total_time_spent', 'num_events', 'avg_time_per_event', 'count']:
+        if col in result_df:
+            result_df[col] = result_df[col].fillna(0)
+    
+    for col in metadata_cols:
+        if col in result_df and col in matching_info:
+            result_df[col] = result_df[col].fillna(matching_info[col])
+    
+    # Time percentage calculation (for duration behaviors only)
+    duration_behaviors = result_df['belongtobehavior'].isin(base_behaviors)
+    group_sum = result_df[duration_behaviors].groupby(['ds', 'sow_num', 'day_cat', 'time_segment'])['total_time_spent'].transform('sum')
+    result_df.loc[duration_behaviors, 'time_percentage'] = np.where(
+        group_sum > 0,
+        (result_df.loc[duration_behaviors, 'total_time_spent'] / group_sum) * 100,
+        0
+    )
+    result_df['time_percentage'] = result_df['time_percentage'].fillna(0)
+    
+    return result_df
+
+# Main processing loop
+all_results = []
+processed = set()
+for file in data_files:
+    filename = os.path.basename(file)
+    parts = filename.split('_')
+    if len(parts) == 4 and parts[0].isdigit():
+        ds = int(parts[0])
+        sow_num = int(parts[3].replace('.csv', ''))
+        if (ds, sow_num) in common_sows and (ds, sow_num) not in processed:
+            print(f"Processing DS{ds} Sow{sow_num}...")
+            result = process_file(file, ds, sow_num)
+            if result is not None:
+                all_results.append(result)
+                processed.add((ds, sow_num))
+
+# Combine and save results
+if all_results:
+    final_df = pd.concat(all_results, ignore_index=True)
+    final_df.to_csv(output_file, index=False)
+    print(f"Processing complete. Results saved to {output_file}")
+    print(f"Final DataFrame shape: {final_df.shape}")
+    print("Columns in final output:")
+    print(final_df.columns.tolist())
+else:
+    print("No valid data processed")
