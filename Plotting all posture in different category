@@ -1,0 +1,115 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Load the dataset
+file_path = r"C:\Users\mrahman8\OneDrive - University of Nebraska-Lincoln\SAU_Drive\0. UNL STUDY\0. Research\0.Current_work\JAN2025\YOLO_139_final.csv"
+df = pd.read_csv(file_path)
+
+# Filter out 'f_day' from day_cat
+df = df[df['day_cat'] != 'f_day']
+
+# Define a function to calculate the standard error
+def standard_error(x):
+    return np.std(x, ddof=1) / np.sqrt(len(x))
+
+# Function to create bar plots
+def plot_grouped_data(group_col, group_values, group_name, figsize=(8, 12), legend_loc='upper left', bbox_to_anchor=(0.05, 1), ncol=1):
+    """
+    Create bar plots for a given grouping column.
+    """
+    grouped = df.groupby([group_col, 'belongtobehavior'])
+    result = grouped['avg_time_per_event'].agg(['mean', standard_error]).reset_index()
+    result.rename(columns={'mean': 'Mean_avg_time_per_event', 'standard_error': 'SE_avg_time_per_event'}, inplace=True)
+
+    # Rename `belongtobehavior` for the chart
+    behavior_rename = {
+    'kneeling': 'Kneeling',
+    'standing': 'Standing',
+    'sitting': 'Sitting',
+    'lyingonbelly': 'Sternal lying',
+    'lyingonleft': 'Lateral (right)',#SInce Kinect flips changed 3-1-25
+    'lyingonright': 'Lateral (left)'#SInce Kinect flips changed 3-1-25
+    }
+
+    # Apply the renaming to the dataset for the chart
+    result['belongtobehavior'] = result['belongtobehavior'].map(behavior_rename)
+
+    # Update the order for renamed labels
+    group_1 = ['Kneeling', 'Standing', 'Sitting']
+    group_2 = ['Sternal lying', 'Lateral (left)', 'Lateral (right)']
+
+    plt.figure(figsize=figsize)
+
+    # Plot for group_1
+    plt.subplot(2, 1, 1)
+    ax1 = sns.barplot(
+        x='belongtobehavior',
+        y='Mean_avg_time_per_event',
+        hue=group_col,
+        data=result[result['belongtobehavior'].isin(group_1)],
+        palette='Set2',
+        order=group_1,
+        errorbar=None
+    )
+    # Add error bars for group_1
+    for bar, row in zip(ax1.patches, result[result['belongtobehavior'].isin(group_1)].itertuples()):
+        x = bar.get_x() + bar.get_width() / 2  # Center of the bar
+        y = bar.get_height()
+        se = row.SE_avg_time_per_event
+        plt.errorbar(
+            x=x,
+            y=y,
+            yerr=se,
+            fmt='none',
+            c='black',
+            capsize=4
+        )
+    plt.grid(axis='y', linestyle='--', linewidth=0.5, color='gray', alpha=0.7)
+    plt.xlabel('', fontsize=18)
+    plt.ylabel('Mean Avg Time Per Event', fontsize=18)
+    plt.legend(fontsize=16, title=group_name, title_fontsize=18, loc=legend_loc, bbox_to_anchor=bbox_to_anchor, ncol=ncol)
+    plt.xticks(fontsize=14)
+    plt.yticks(fontsize=16)
+    # Plot for group_2
+    plt.subplot(2, 1, 2)
+    ax2 = sns.barplot(
+        x='belongtobehavior',
+        y='Mean_avg_time_per_event',
+        hue=group_col,
+        data=result[result['belongtobehavior'].isin(group_2)],
+        palette='Set2',
+        order=group_2
+    )
+    # Add error bars for group_2
+    for bar, row in zip(ax2.patches, result[result['belongtobehavior'].isin(group_2)].itertuples()):
+        x = bar.get_x() + bar.get_width() / 2  # Center of the bar
+        y = bar.get_height()
+        se = row.SE_avg_time_per_event
+        plt.errorbar(
+            x=x,
+            y=y,
+            yerr=se,
+            fmt='none',
+            c='black',
+            capsize=4
+        )
+    plt.grid(axis='y', linestyle='--', linewidth=0.5, color='gray', alpha=0.7,)
+    plt.xlabel('Posture', fontsize=18)
+    plt.ylabel('Mean Avg Time Per Event', fontsize=18)
+    plt.legend(fontsize=18, title_fontsize=18, title=group_name, loc=legend_loc, bbox_to_anchor=bbox_to_anchor, ncol=ncol)
+    plt.xticks(fontsize=18)
+    plt.yticks(fontsize=18)
+    plt.tight_layout()
+    plt.show()
+
+
+
+
+# Generate plots for all specified groups
+plot_grouped_data('mortality', ['High', 'Low'], 'Mortality', figsize=(8, 10), legend_loc='upper left', bbox_to_anchor=(0.05, 1))
+plot_grouped_data('parity', [1, 2, 3, 4], 'Parity', figsize=(8, 10), legend_loc='upper left', bbox_to_anchor=(0.05, .951), ncol=1)
+plot_grouped_data('day_cat', ['pre', 'post'], 'Day Category', figsize=(8, 10), legend_loc='upper left', bbox_to_anchor=(0.05, 1))
+plot_grouped_data('crate_category', ['TSL', 'ECSL', 'ESCSL'], 'Stall Types', figsize=(8, 10), legend_loc='upper left', bbox_to_anchor=(0.10, .951), ncol=1)
+plot_grouped_data('heat_lamps', [1, 2], 'Heat Lamps', figsize=(8, 10), legend_loc='upper left', bbox_to_anchor=(0.05, 1))
